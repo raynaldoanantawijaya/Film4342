@@ -8,6 +8,7 @@ debug_*.html
 *.json
 !package.json
 !package-lock.json
+!vercel.json
 temp/
 extracted_context.json
 deobfuscated_*.js
