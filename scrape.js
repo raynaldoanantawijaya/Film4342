@@ -42,20 +42,22 @@ async function searchMovies(query) {
 
 async function getStreamSource(embedUrl) {
     try {
-        console.log(`Getting stream source from: ${embedUrl}`);
+        console.log(`Extracting stream source from: ${embedUrl}`);
         const response = await axiosInstance.get(embedUrl, {
             headers: {
                 'Referer': BASE_URL
             }
         });
         let html = response.data; // Changed to let to allow modification
-
+        console.log("HTML Length:", html.length);
         // Debug dump
         // Adding fs require at top
 
         // Extract variables used in obfuscation
         let qsx = '';
         let kaken = '';
+        let pd = '';
+        let ps = '';
 
         // Check for AAEncode
         const aaEncodeMatch = html.match(/(ﾟωﾟﾉ=.*?)\s*<\/script>/s);
@@ -63,71 +65,65 @@ async function getStreamSource(embedUrl) {
             console.log("Found AAEncode obfuscation. Decoding...");
             let code = aaEncodeMatch[1];
 
-            // Replace the execution with a capture
-            // Pattern: (ﾟДﾟ) ['_'] ( (ﾟДﾟ) ['_']
-            // We replace with: capture
-            // But we need to be careful. The code defines (ﾟДﾟ) first.
-            // We want to replace the LAST invocation.
-
-            // Alternative decoding: Strip the final execution call ('_');
-            // and eval to get the function, then toString() to see code.
-
-            // Look for ('_'); at the end
             const strippedCode = code.replace(/\('_'\);\s*$/, "");
 
             if (strippedCode !== code) {
                 console.log("Stripped execution call. Evaluating...");
                 try {
-                    // Eval the stripped code. It should return a Function.
                     const ret = eval(strippedCode);
 
                     if (typeof ret === 'function') {
                         console.log("AAEncode Decoded Successfully! Executing unpacked code...");
 
-                        // Mock window to capture variables
                         const mockWindow = {};
                         global.window = mockWindow;
 
                         try {
-                            // Execute the function. It contains eval(packed_code).
                             ret();
                         } catch (err) {
                             console.error("Error executing unpacked script:", err.message);
                         }
 
                         // Capture extracted vars
+                        console.log("MockWindow Keys:", Object.keys(mockWindow));
                         if (mockWindow.qsx) qsx = mockWindow.qsx;
                         if (mockWindow.kaken) kaken = mockWindow.kaken;
+                        if (mockWindow.pd) pd = mockWindow.pd;
+                        if (mockWindow.ps) ps = mockWindow.ps;
 
-                        console.log(`Deep Extraction Result: qsx=${qsx ? 'FOUND' : 'MISSING'}, kaken=${kaken ? 'FOUND' : 'MISSING'}`);
+                        // Check global too
+                        if (!pd && global.pd) {
+                            console.log("Found pd on global!");
+                            pd = global.pd;
+                        }
 
-                        // Cleanup
+                        console.log(`Deep Extraction Result: qsx=${qsx ? 'FOUND' : 'MISSING'}, pd=${pd ? 'FOUND' : 'MISSING'}`);
+
                         delete global.window;
-                    } else {
-                        console.log("Eval result was not a function:", typeof ret);
                     }
                 } catch (e) {
                     console.error("AAEncode Strip-Eval Error:", e.message);
                 }
-            } else {
-                console.log("Could not find ('_'); at end of AAEncode block.");
             }
         }
 
         // Search more flexibly
-        // window.qsx = "..." or window.qsx='...'
         const qsxMatch = html.match(/window\.qsx\s*=\s*['"](.*?)['"]/);
         if (qsxMatch) qsx = qsxMatch[1];
 
         const kakenMatch = html.match(/window\.kaken\s*=\s*['"](.*?)['"]/);
         if (kakenMatch) kaken = kakenMatch[1];
 
-        console.log(`Extracted vars: qsx=${qsx ? 'FOUND' : 'MISSING'}, kaken=${kaken ? 'FOUND' : 'MISSING'}`);
+        const pdMatch = html.match(/window\.pd\s*=\s*['"]?(.*?)['"]?;/);
+        if (pdMatch) pd = pdMatch[1];
 
-        if (!qsx) {
-            console.log("Dumping HTML to debug_scraped.html");
-            fs.writeFileSync('debug_scraped.html', html);
-        }
+        const psMatch = html.match(/window\.ps\s*=\s*['"](.*?)['"]/);
+        if (psMatch) ps = psMatch[1];
+
+        console.log(`Extracted vars: qsx=${qsx ? 'FOUND' : 'MISSING'}, kaken=${kaken ? 'FOUND' : 'MISSING'}, pd=${pd ? 'FOUND' : 'MISSING'}`);
+
+        console.log("Dumping HTML to debug_scraped.html");
+        fs.writeFileSync('debug_scraped.html', html);
 
         if (qsx) {
             const baseUrl = Buffer.from(qsx, 'base64').toString('utf8');
@@ -152,7 +148,80 @@ async function getStreamSource(embedUrl) {
             }
 
             // If explicit API call needed:
-            const apiUrl = `${baseUrl}?p=${kaken}`;
+            // Based on analysis: url: atob(qsx) + ps
+            // qsx decodes to base URL. ps (or pd?) is the suffix?
+            // extracted_vars.json had 'ps' but it was empty/undefined in some runs?
+            // Wait, fetch_config.js confirmed: https://s1.vidhide.org/api-config/ + qsx (as string) Worked!?
+            // No, fetch_config.js confirmed that `qsx` string concatenated to base was 404/garbage?
+            // Wait, Step 1797 showed status 200 for: https://s1.vidhide.org/api-config/TGhFV21tNVRjb0...
+            // where `TGh...` was the `qsx` variable!
+            // So API URL is Base + Qsx?
+
+            // Re-verify Step 1821: Fetching https://s1.vidhide.org/api-config/pPEif7... (404)
+            // But Step 1797: Fetching https://s1.vidhide.org/api-config/TGhFV21tNVRjb0V2... (200)
+            // 
+            // `TGhFV21tNVRjb0V2...` matches the `qsx` value in extracted_vars.json (Step 1637).
+            // `pPEif7...` was the OLD qsx value from truncation.
+
+            // So `qsx` IS the path param.
+            // And we might need `?p=...` or similar?
+            // `fetch_config.js` tried `qsx` + `?ps=` and got 200.
+
+            const apiUrl = `${baseUrl}${qsx}`; // baseUrl is decoded from... wait.
+            // Actually, `qsx` in extracted_vars is the FULL path suffix?
+            // extracted qsx: "TGhFV21tNVRjb0V2..."
+            // If we base64 decode it...
+            // "LhEWmm5TcoEv..."
+
+            // Let's just use the `qsx` variable AS the extra path.
+            // The `baseUrl` in line 147 was `Buffer.from(qsx, 'base64').toString('utf8');`.
+            // If `qsx` is "TGh...", decoding it yields garbage or a string? 
+            // "TGhFV21tNVRjb0V2LH..." -> "LhEWmm5TcoEv..."
+            // It doesn't look like a URL.
+
+            // Derive p STRICTLY from kaken
+            let p_param = '';
+            if (kaken) {
+                const kakenParts = kaken.split(',');
+                // Observed pattern: kaken contains comma-separated values.
+                // The relevant part seems to be the one that looks like a base64 string, often the 2nd one.
+                // Session dump showed: "...,aWVh3iodRYChgVV95O2HJkEB9JeALgqvdUriUgi8kA269Wff50l55mpe9LDY28ks5IGjz0/6WYg1heSP4sGTzLw==,,"
+                // So splitting by ',' gives: 
+                // [0]: "ZzU2..." (looks like qsx?)
+                // [1]: "aWVh..." (This is likely p!)
+                // [2]: ""
+
+                if (kakenParts.length > 1) {
+                    p_param = kakenParts[1];
+                }
+            }
+
+            if (!p_param) {
+                console.log("Failed to derive p_param from kaken.");
+                return null;
+            }
+
+            const finalApiUrl = `https://s1.vidhide.org/api-config/${qsx}?p=${p_param}&_=${Date.now()}`;
+            console.log("Constructed API URL:", finalApiUrl);
+
+            // Let's try to fetch it here to prove it works
+            const apiRes = await axiosInstance.get(finalApiUrl, {
+                headers: {
+                    'Referer': embedUrl
+                }
+            });
+            const apiData = apiRes.data;
+            console.log("API Response Type:", typeof apiData);
+            const dataStr = typeof apiData === 'object' ? JSON.stringify(apiData) : apiData.toString();
+            console.log("API Response Length:", dataStr.length);
+            console.log("API Response Snippet:", dataStr.substring(0, 500));
+
+            if (apiData.sources) {
+                console.log("Found sources in API response!");
+                return apiData.sources;
+            }
+
+            return apiData;
             console.log("Target API URL:", apiUrl);
 
             return apiUrl + " (Pending Full Decryption)";
@@ -211,6 +280,16 @@ if (require.main === module) {
 
             if (query) {
                 console.log(`Command line query: "${query}"`);
+
+                // Direct URL debug mode
+                if (query.includes('http')) {
+                    console.log("Direct URL detected. Extracting...");
+                    const finalSource = await getStreamSource(query);
+                    console.log("\n>>> SUCCESS: Extracted Info <<<");
+                    console.log(finalSource);
+                    return;
+                }
+
                 const results = await searchMovies(query);
                 if (results.length === 0) {
                     console.log("No results found.");
